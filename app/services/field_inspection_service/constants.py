@@ -1,0 +1,15 @@
+SERVICE_CODE = "field_inspection"
+
+ROLE_CURATOR = "curator"
+ROLE_INSPECTOR = "inspector"
+ROLE_ADMIN = "admin"
+
+CAMPAIGN_STATUS_DRAFT = "draft"
+CAMPAIGN_STATUS_PLANNING = "planning"
+CAMPAIGN_STATUS_ACTIVE = "active"
+CAMPAIGN_STATUS_COMPLETED = "completed"
+
+TASK_STATUS_ASSIGNED = "assigned"
+TASK_STATUS_IN_PROGRESS = "in_progress"
+TASK_STATUS_COMPLETED = "completed"
+TASK_STATUS_NEEDS_REVIEW = "needs_review"

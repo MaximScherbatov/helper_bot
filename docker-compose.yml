@@ -1,0 +1,46 @@
+version: "3.9"
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: tdm_bot_redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+
+  bot:
+    build: .
+    container_name: tdm_bot_app
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      - redis
+    volumes:
+      - ./storage:/app/storage
+    command: python -m app.main
+    networks:
+      - default
+      - web
+
+  worker:
+    build: .
+    container_name: tdm_bot_worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      - redis
+    volumes:
+      - ./storage:/app/storage
+    command: celery -A app.worker.celery_app worker --loglevel=info
+    networks:
+      - default
+      - web
+
+volumes:
+  redis_data:
+
+networks:
+  web:
+    external: true

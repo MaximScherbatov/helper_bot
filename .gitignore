@@ -1,0 +1,12 @@
+__pycache__/
+.idea/
+.env
+.env.*
+.venv/
+*.xlsx
+*.log
+dist/
+build/
+node_modules/
+storage/output/
+storage/input/
