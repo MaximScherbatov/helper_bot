@@ -27,6 +27,7 @@ class DaDataBatchProcessor:
         "Строка",
         "Исходное_значение_1",
         "Исходное_значение_2",
+        "Исходное_значение_3",
         "ИНН",
         "КПП",
         "ОГРН",
@@ -50,9 +51,17 @@ class DaDataBatchProcessor:
 
         queries = []
         for row in rows:
-            query_value = row.detected_inn or row.detected_name
+            query_value = row.detected_inn or row.detected_ogrn or row.detected_name
             if not query_value:
                 continue
+
+            digits = "".join(ch for ch in str(query_value) if ch.isdigit())
+            has_letters = any(ch.isalpha() for ch in str(query_value))
+            if (not has_letters) and digits:
+                # цифры без букв должны быть ИНН/ОГРН/ОГРНИП по длине, иначе считаем ошибочным вводом
+                if len(digits) not in (10, 12, 13, 15):
+                    continue
+
             query_type, normalized_query = normalize_query(query_value)
             queries.append((query_type, normalized_query))
 
@@ -103,14 +112,40 @@ class DaDataBatchProcessor:
                         message=f"Обработка строки {idx} из {total}",
                     )
 
-                result_rows.append(
-                    self._process_one_row(
-                        row=row,
-                        repo=repo,
-                        key_manager=key_manager,
-                        client=client,
+                try:
+                    result_rows.append(
+                        self._process_one_row(
+                            row=row,
+                            repo=repo,
+                            key_manager=key_manager,
+                            client=client,
+                        )
                     )
-                )
+                except Exception as e:
+                    result_rows.append(
+                        {
+                            "Строка": getattr(row, "row_number", None),
+                            "Исходное_значение_1": getattr(row, "source_col_1", None),
+                            "Исходное_значение_2": getattr(row, "source_col_2", None),
+                            "Исходное_значение_3": getattr(row, "source_col_3", None),
+                            "ИНН": None,
+                            "КПП": None,
+                            "ОГРН": None,
+                            "Полное_наименование": None,
+                            "Краткое_наименование": None,
+                            "Статус_организации": None,
+                            "Дата_регистрации": None,
+                            "Дата_ликвидации": None,
+                            "Адрес": None,
+                            "Индекс": None,
+                            "Руководитель": None,
+                            "Должность": None,
+                            "ОКВЭД": None,
+                            "ОКВЭД_описание": None,
+                            "Москва_флаг": None,
+                            "Ошибка": f"Unhandled row error: {str(e)[:500]}",
+                        }
+                    )
 
         df = pd.DataFrame(result_rows, columns=self.OUTPUT_COLUMNS)
         df.to_excel(output_path, index=False)
@@ -125,6 +160,7 @@ class DaDataBatchProcessor:
             "Строка": row.row_number,
             "Исходное_значение_1": row.source_col_1,
             "Исходное_значение_2": row.source_col_2,
+            "Исходное_значение_3": row.source_col_3,
             "ИНН": None,
             "КПП": None,
             "ОГРН": None,
@@ -143,12 +179,27 @@ class DaDataBatchProcessor:
             "Ошибка": None,
         }
 
-        query_value = row.detected_inn or row.detected_name
+        query_value = row.detected_inn or row.detected_ogrn or row.detected_name
+        digits = "".join(ch for ch in str(query_value) if ch.isdigit())
+        has_letters = any(ch.isalpha() for ch in str(query_value))
+
+        if (not has_letters) and digits:
+            if len(digits) not in (10, 12, 13, 15):
+                base["Ошибка"] = "Некорректный идентификатор (ожидался ИНН 10/12, ОГРН 13 или ОГРНИП 15 цифр)"
+                return base
+
         if not query_value:
-            base["Ошибка"] = "Не найден ИНН или наименование"
+            base["Ошибка"] = "Не найден ИНН/ОГРН или наименование"
             return base
 
         query_type, normalized_query = normalize_query(query_value)
+        if not normalized_query:
+            base["Ошибка"] = "Пустой запрос после очистки"
+            return base
+
+        if query_type == "name" and len(normalized_query) < 3:
+            base["Ошибка"] = "Слишком короткое наименование для поиска"
+            return base
 
         cached = repo.get_cache(query_type, normalized_query)
         response_json = None
