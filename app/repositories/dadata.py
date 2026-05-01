@@ -21,20 +21,7 @@ class DaDataRepository:
         return list(rows)
 
     def get_first_available_key(self) -> DaDataApiKey | None:
-        today = date.today()
-        keys = self.get_active_keys()
-
-        for key in keys:
-            if key.last_reset_date != today:
-                key.used_today = 0
-                key.last_reset_date = today
-        self.session.commit()
-
-        for key in keys:
-            if key.used_today < key.daily_limit:
-                return key
-
-        return None
+        return self.get_best_available_key()
 
     def increment_key_usage(self, key_id: int) -> None:
         key = self.session.get(DaDataApiKey, key_id)
@@ -54,9 +41,14 @@ class DaDataRepository:
         api_key: str,
         comment: str | None = None,
         daily_limit: int = 10000,
+        owner_user_id: int | None = None,
+        is_shared: bool = True,
+        priority: int = 100,
     ) -> DaDataApiKey:
         row = DaDataApiKey(
             api_key=api_key,
+            is_shared=is_shared,
+            priority=priority,
             is_active=True,
             daily_limit=daily_limit,
             used_today=0,
@@ -167,3 +159,51 @@ class DaDataRepository:
         )
         self.session.add(row)
         self.session.commit()
+
+    def mark_key_exhausted(self, key_id: int) -> None:
+        key = self.session.get(DaDataApiKey, key_id)
+        if key is None:
+            return
+
+        today = date.today()
+        if key.last_reset_date != today:
+            key.last_reset_date = today
+
+        key.used_today = key.daily_limit
+        self.session.commit()
+
+    def get_best_available_key(self) -> DaDataApiKey | None:
+        today = date.today()
+
+        keys = list(
+            self.session.scalars(
+                select(DaDataApiKey)
+                .where(
+                    DaDataApiKey.is_active.is_(True),
+                    DaDataApiKey.is_shared.is_(True),
+                )
+                .order_by(DaDataApiKey.priority.desc(), DaDataApiKey.id.asc())
+            )
+        )
+
+        # сброс дневного счётчика (одним проходом)
+        changed = False
+        for key in keys:
+            if key.last_reset_date != today:
+                key.used_today = 0
+                key.last_reset_date = today
+                changed = True
+        if changed:
+            self.session.commit()
+
+        best = None
+        best_remaining = -1
+        for key in keys:
+            remaining = max(0, key.daily_limit - key.used_today)
+            if remaining <= 0:
+                continue
+            if remaining > best_remaining:
+                best = key
+                best_remaining = remaining
+
+        return best

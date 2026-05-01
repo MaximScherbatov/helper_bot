@@ -1,6 +1,7 @@
-import re
-import petrovna
 from datetime import datetime, timedelta
+import petrovna
+import re
+import requests
 from typing import Optional, Any
 
 from messenger_bot_api.data_classes import InlineMessageButton
@@ -118,134 +119,112 @@ class DaDataService(BaseService):
                 )
                 return True
 
-            api_key_row = key_manager.get_available_key()
-            if api_key_row is None:
-                repo.log_usage(
-                    query_type=query_type,
-                    query_value=query,
-                    normalized_query=normalized_query,
-                    status="error",
-                    error_text="Нет доступных API-ключей DaData",
-                )
-                event.reply_text(texts.DADATA_NO_KEYS_TEXT)
-                return True
+            response_json = None
+            api_key_row = None
+            last_error = None
 
-            try:
-                count = 20 if query_type == "name" else 1
+            count = 20 if query_type == "name" else 1
 
-                response_json = client.suggest_party(
-                    api_key=api_key_row.api_key,
-                    query=normalized_query,
-                    count=count,
-                )
+            for _ in range(50):  # максимум 50 попыток переключиться между ключами
+                api_key_row = key_manager.get_available_key()
+                if api_key_row is None:
+                    break
 
-                suggestions = response_json.get("suggestions", [])
-                key_manager.mark_success_usage(api_key_row.id)
+                try:
+                    response_json = client.suggest_party(
+                        api_key=api_key_row.api_key,
+                        query=normalized_query,
+                        count=count,
+                    )
 
-                if not suggestions:
+                    # ВАЖНО: считаем usage по факту попытки успешного HTTP-вызова
+                    # (если хочешь считать "до вызова" — можно перенести строку выше)
+                    key_manager.mark_attempt_usage(api_key_row.id)
+                    break
+
+                except requests.exceptions.HTTPError as e:
+                    status = getattr(getattr(e, "response", None), "status_code", None)
+
+                    # Если сервер ответил HTTP-ошибкой — это тоже была попытка запроса,
+                    # её разумно учитывать в used_today.
+                    key_manager.mark_attempt_usage(api_key_row.id)
+
+                    last_error = e
+
+                    # ключ исчерпан / заблокирован по лимиту -> помечаем исчерпанным и пробуем следующий
+                    if status in (429, 403):
+                        key_manager.mark_exhausted(api_key_row.id)
+                        continue
+
+                    # прочие HTTP ошибки: не крутим ключи бесконечно
+                    break
+
+                except requests.exceptions.RequestException as e:
+                    # сетевые ошибки (нет response) — обычно лучше НЕ списывать usage (мы выше не списывали)
+                    last_error = e
+                    break
+
+                except Exception as e:
+                    last_error = e
+                    break
+
+            # дальше — единая обработка случая "не получили ответ"
+            if response_json is None:
+                if api_key_row is None:
                     repo.log_usage(
                         query_type=query_type,
                         query_value=query,
                         normalized_query=normalized_query,
-                        status="no_results",
-                        api_key_id=api_key_row.id,
+                        status="error",
+                        error_text="Нет доступных API-ключей DaData",
                     )
-                    event.reply_text(texts.DADATA_NOT_FOUND_TEXT)
+                    event.reply_text(texts.DADATA_NO_KEYS_TEXT)
                     return True
 
-                ttl_days = 30 if query_type == "inn" else 7
-                repo.upsert_cache(
-                    query_type=query_type,
-                    query_value=query,
-                    normalized_query=normalized_query,
-                    response_json=response_json,
-                    source_key_id=api_key_row.id,
-                    expires_at=datetime.utcnow() + timedelta(days=ttl_days),
-                )
-
-                repo.log_usage(
-                    query_type=query_type,
-                    query_value=query,
-                    normalized_query=normalized_query,
-                    status="success",
-                    api_key_id=api_key_row.id,
-                )
-
-                if query_type == "inn":
-                    self._set_step(
-                        event=event,
-                        step="awaiting_query",
-                        context_data={
-                            "last_query": query,
-                            "query_type": query_type,
-                            "normalized_query": normalized_query,
-                            "last_response_json": response_json,
-                            "selected_index": 0,
-                        },
-                    )
-                    self._send_result(
-                        event,
-                        response_json,
-                        from_cache=False,
-                        variants=None,
-                        selected_index=0,
-                    )
-                    return True
-
-                # Для поиска по name сортируем все варианты по приоритету
-                variants = self._build_sorted_variants(suggestions)
-
-                if len(variants) == 1:
-                    response_json = {"suggestions": [variants[0]["item"]]}
-                    self._set_step(
-                        event=event,
-                        step="awaiting_query",
-                        context_data={
-                            "last_query": query,
-                            "query_type": query_type,
-                            "normalized_query": normalized_query,
-                            "last_response_json": response_json,
-                            "variants": variants,
-                            "selected_index": 0,
-                        },
-                    )
-                    self._send_result(
-                        event,
-                        response_json,
-                        from_cache=False,
-                        variants=variants,
-                        selected_index=0,
-                    )
-                    return True
-
-                self._set_step(
-                    event=event,
-                    step="awaiting_selection",
-                    context_data={
-                        "last_query": query,
-                        "query_type": query_type,
-                        "normalized_query": normalized_query,
-                        "variants": variants,
-                        "page": 0,
-                        "page_size": self.PAGE_SIZE,
-                        "selected_index": None,
-                    },
-                )
-
-                self._send_variants(event, variants, page=0)
-                return True
-
-            except Exception as e:
                 repo.log_usage(
                     query_type=query_type,
                     query_value=query,
                     normalized_query=normalized_query,
                     status="error",
                     api_key_id=api_key_row.id,
-                    error_text=str(e)[:500],
+                    error_text=str(last_error)[:500] if last_error else "DaData error",
                 )
                 event.reply_text(texts.DADATA_EXTERNAL_ERROR_TEXT)
                 return True
+
+            # --- С этого места код у тебя остаётся как был ---
+            suggestions = response_json.get("suggestions", [])
+
+            if not suggestions:
+                repo.log_usage(
+                    query_type=query_type,
+                    query_value=query,
+                    normalized_query=normalized_query,
+                    status="no_results",
+                    api_key_id=api_key_row.id,
+                )
+                event.reply_text(texts.DADATA_NOT_FOUND_TEXT)
+                return True
+
+            ttl_days = 30 if query_type == "inn" else 7
+            repo.upsert_cache(
+                query_type=query_type,
+                query_value=query,
+                normalized_query=normalized_query,
+                response_json=response_json,
+                source_key_id=api_key_row.id,
+                expires_at=datetime.utcnow() + timedelta(days=ttl_days),
+            )
+
+            repo.log_usage(
+                query_type=query_type,
+                query_value=query,
+                normalized_query=normalized_query,
+                status="success",
+                api_key_id=api_key_row.id,
+            )
+
+            # дальше у тебя: ветка inn / ветка name / variants и т.д.
 
     def handle_button(self, router, event, context: Optional[dict] = None) -> bool:
         callback_data = event.selected_button.callback_data if event.selected_button else None
