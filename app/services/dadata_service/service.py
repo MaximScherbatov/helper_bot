@@ -1,3 +1,5 @@
+import re
+import petrovna
 from datetime import datetime, timedelta
 from typing import Optional, Any
 
@@ -42,6 +44,11 @@ class DaDataService(BaseService):
 
         if not self._is_valid_query(query):
             event.reply_text(texts.DADATA_INVALID_QUERY_TEXT)
+            return True
+
+        ok, kind = self._validate_identifier_if_any(query)
+        if not ok:
+            event.reply_text(texts.DADATA_INVALID_ID_TEXT.format(kind=kind or "значение"))
             return True
 
         query_type, normalized_query = normalize_query(query)
@@ -763,3 +770,53 @@ class DaDataService(BaseService):
             return ", ".join(names) if names else "—"
 
         return self._safe_value(management_data)
+
+    def _validate_identifier_if_any(self, raw: str) -> tuple[bool, str | None]:
+        """
+        Если ввод выглядит как идентификатор (нет букв, есть цифры) — валидируем:
+        - ИНН (10/12)
+        - ОГРН (13)
+        - ОГРНИП (15)
+
+        Возвращает:
+        - (True, None) если всё ок или это явно не идентификатор (например, название с буквами)
+        - (False, "ИНН"/"ОГРН"/"ОГРНИП"/"идентификатор") если контрольная не сходится/длина странная
+        """
+        s = (raw or "").strip()
+        if not s:
+            return True, None
+
+        has_letters = bool(re.search(r"[A-Za-zА-Яа-яЁё]", s))
+        digits = "".join(ch for ch in s if ch.isdigit())
+
+        # Если есть буквы — это наименование организации, контрольные суммы не проверяем
+        if has_letters:
+            return True, None
+
+        if not digits:
+            return True, None
+
+        try:
+            if len(digits) in (10, 12):
+                return petrovna.validate_inn(digits), "ИНН"
+            if len(digits) == 13:
+                return petrovna.validate_ogrn(digits), "ОГРН"
+            if len(digits) == 15:
+                return petrovna.validate_ogrnip(digits), "ОГРНИП"
+        except Exception:
+            # на всякий случай: не валим сервис на неожиданных ошибках библиотеки
+            return False, "идентификатор"
+
+        # Если пользователь ввёл "длинное число", но длина не похожа на ИНН/ОГРН — лучше остановить
+        # (так не будем тратить запросы на мусор)
+        if len(digits) in (10, 12):
+            return petrovna.validate_inn(digits), "ИНН"
+        if len(digits) == 13:
+            return petrovna.validate_ogrn(digits), "ОГРН"
+        if len(digits) == 15:
+            return petrovna.validate_ogrnip(digits), "ОГРНИП"
+
+        # любая другая длина цифр без букв — считаем невалидным идентификатором
+        return False, "идентификатор"
+
+        return True, None
