@@ -1,6 +1,6 @@
+from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-
 from app.db.models import UserContext
 
 
@@ -37,6 +37,7 @@ class ContextRepository:
             )
             self.session.add(current)
         else:
+            current.updated_at = datetime.utcnow()
             current.workspace_id = workspace_id
             current.group_id = group_id
             current.active_service_code = active_service_code
