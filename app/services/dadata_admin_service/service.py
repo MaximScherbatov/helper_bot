@@ -1,5 +1,6 @@
 from typing import Optional
-
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy import select
 from messenger_bot_api.data_classes import InlineMessageButton
 from messenger_bot_api.util import MessageRequest
 
@@ -7,7 +8,8 @@ from app.bot.context_manager import ContextManager
 from app.db.session import SessionLocal
 from app.repositories.dadata import DaDataRepository
 from app.services.base import BaseService
-
+from app.config import get_settings
+from app.db.models import BotUser
 
 class DaDataAdminService(BaseService):
     code = "dadata_admin"
@@ -18,7 +20,45 @@ class DaDataAdminService(BaseService):
         self._set_step(event, "menu", {})
         self._show_admin_menu(event)
 
+    def _is_admin(self, event) -> bool:
+        settings = get_settings()
+        return int(event.sender_id) in set(settings.admin_tdm_user_ids or [])
+
     def handle_message(self, router, event, context: Optional[dict] = None) -> bool:
+        
+        # Обработка ввода нового ключа
+        step = (context or {}).get("step")
+        if step == "awaiting_new_key":
+            api_key = (event.message_text or "").strip()
+            if not api_key:
+                event.reply_text("Ключ не может быть пустым.")
+                return True
+            
+            comment = "Добавлен через бота"
+            with SessionLocal() as session:
+                repo = DaDataRepository(session)
+                try:
+                    user = session.scalar(select(BotUser).where(BotUser.tdm_user_id == event.sender_id))
+                    owner_user_id = user.id if user else None
+
+                    #repo.create_api_key(api_key=api_key, comment=comment)
+                    repo.create_api_key(
+                        api_key=api_key,
+                        comment=comment,
+                        owner_user_id=owner_user_id,
+                        is_shared=True,
+                        priority=100,
+                    )
+                    event.reply_text(f"✅ Ключ успешно добавлен!\nТеперь используйте команду `keys` для просмотра.")
+                    self._set_step(event, "menu", {})
+                except IntegrityError:
+                    session.rollback()
+                    event.reply_text("ℹ️ Такой ключ уже есть в системе (дубликат).")
+                except Exception as e:
+                    session.rollback()
+                    event.reply_text(f"❌ Ошибка при добавлении: {str(e)[:300]}")
+            return True
+        
         text = (event.message_text or "").strip().lower()
 
         if text == "keys" or text == "ключи":
@@ -30,7 +70,11 @@ class DaDataAdminService(BaseService):
             event.reply_text("🔑 Введите новый API-ключ DaData:\n(или /cancel для отмены)")
             return True
 
+
         if text.startswith("toggle"):
+            if not self._is_admin(event):
+                event.reply_text("⛔ Это действие доступно только администратору.")
+                return True
             parts = text.split()
             if len(parts) != 2 or not parts[1].isdigit():
                 event.reply_text("❌ Формат: `toggle <id>`\nПример: `toggle 1`")
@@ -40,26 +84,12 @@ class DaDataAdminService(BaseService):
             self._toggle_key(event, key_id)
             return True
 
-        # Обработка ввода нового ключа
-        step = (context or {}).get("step")
-        if step == "awaiting_new_key":
-            api_key = event.message_text.strip()
-            if not api_key:
-                event.reply_text("Ключ не может быть пустым.")
-                return True
-            
-            comment = "Добавлен через бота"
-            with SessionLocal() as session:
-                repo = DaDataRepository(session)
-                try:
-                    repo.create_api_key(api_key=api_key, comment=comment)
-                    event.reply_text(f"✅ Ключ успешно добавлен!\nТеперь используйте команду `keys` для просмотра.")
-                    self._set_step(event, "menu", {})
-                except Exception as e:
-                    event.reply_text(f"❌ Ошибка при добавлении: {e}")
-            return True
+        
 
-        event.reply_text("Неизвестная команда. Доступные: `keys`, `add`, `toggle <id>`")
+        if self._is_admin(event):
+            event.reply_text("Неизвестная команда. Доступные: `keys`, `add`, `toggle <id>`")
+        else:
+            event.reply_text("Неизвестная команда. Доступные: `keys`, `add`")
         return True
 
     def handle_button(self, router, event, context: Optional[dict] = None) -> bool:
@@ -98,41 +128,86 @@ class DaDataAdminService(BaseService):
             )
 
     def _show_admin_menu(self, event):
-        buttons = [
-            InlineMessageButton(
-                id=1,
-                label="📋 Список ключей",
-                callback_data="dadata_admin:list",
-                callback_message="Показан список ключей"
-            ),
-            InlineMessageButton(
-                id=2,
-                label="➕ Добавить ключ",
-                callback_data="dadata_admin:add",
-                callback_message="Добавление нового ключа"
-            ),
-        ]
+        is_admin = self._is_admin(event)
+
+        # грузим все ключи один раз
+        with SessionLocal() as session:
+            from app.db.models import DaDataApiKey
+            all_keys = session.scalars(select(DaDataApiKey).order_by(DaDataApiKey.id.desc())).all()
+
+        active_shared = [k for k in all_keys if k.is_active and getattr(k, "is_shared", True)]
+        remaining = sum(max(0, (k.daily_limit or 0) - (k.used_today or 0)) for k in active_shared)
+
+        if not is_admin:
+            event.reply_text_message(
+                MessageRequest(
+                    text="\n".join([
+                        "🗝 Ключи DaData (общая копилка)",
+                        f"Активных ключей: {len(active_shared)}",
+                        f"Суммарно доступно запросов сегодня: {remaining}",
+                        "",
+                        "ℹ️ Вы можете добавить свой ключ и увеличить общий лимит.",
+                    ]),
+                    buttons=[
+                        InlineMessageButton(
+                            id=1,
+                            label="➕ Добавить ключ",
+                            callback_data="dadata_admin:add",
+                            callback_message="Добавление ключа",
+                        ),
+                    ],
+                )
+            )
+            return
+
+        # админское меню
         event.reply_text_message(
             MessageRequest(
                 text="🛠 Панель управления DaData\n\nВыберите действие:",
-                buttons=buttons
+                buttons=[
+                    InlineMessageButton(
+                        id=1,
+                        label="📋 Список ключей",
+                        callback_data="dadata_admin:list",
+                        callback_message="Показан список ключей",
+                    ),
+                    InlineMessageButton(
+                        id=2,
+                        label="➕ Добавить ключ",
+                        callback_data="dadata_admin:add",
+                        callback_message="Добавление нового ключа",
+                    ),
+                ],
             )
         )
 
     def _show_keys_list(self, event):
+        is_admin = self._is_admin(event)
+
         with SessionLocal() as session:
-            repo = DaDataRepository(session)
-            keys = repo.get_active_keys()
-            
-            # Получаем ВСЕ ключи, даже неактивные, для полного списка
-            from sqlalchemy import select
             from app.db.models import DaDataApiKey
-            all_keys = session.scalars(select(DaDataApiKey).order_by(DaDataApiKey.id.desc())).all()
+            all_keys = session.scalars(
+                select(DaDataApiKey).order_by(DaDataApiKey.id.desc())
+            ).all()
 
         if not all_keys:
             event.reply_text("Ключи пока не добавлены.")
             return
 
+        if not is_admin:
+            active_shared = [k for k in all_keys if k.is_active and getattr(k, "is_shared", True)]
+            remaining = sum(max(0, (k.daily_limit or 0) - (k.used_today or 0)) for k in active_shared)
+
+            event.reply_text("\n".join([
+                "🗝 Ключи DaData (общая копилка)",
+                f"Активных ключей: {len(active_shared)}",
+                f"Суммарно доступно запросов сегодня: {remaining}",
+                "",
+                "ℹ️ Чтобы добавить ключ — нажмите кнопку «Добавить ключ» в меню сервиса.",
+            ]))
+            return
+
+        # --- админский вывод списка ---
         lines = ["🗝 Список API-ключей:"]
 
         for key in all_keys:
