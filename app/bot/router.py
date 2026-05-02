@@ -274,7 +274,9 @@ class BotRouter:
                 event.reply_text(texts.SERVICE_NOT_FOUND_TEXT)
                 return
 
-            service.resume(self, event, context=context.context_data or {})
+            service_ctx = dict(context.context_data or {})
+            service_ctx["step"] = context.step
+            service.resume(self, event, context=service_ctx)
 
         finally:
             self._confirm_event_safe(event)
@@ -405,7 +407,10 @@ class BotRouter:
                     event.reply_text(texts.SERVICE_NOT_FOUND_TEXT)
                     return
 
-                handled = service.handle_button(self, event, context=context.context_data or {})
+                service_ctx = dict(context.context_data or {})
+                service_ctx["step"] = context.step
+                handled = service.handle_button(self, event, context=service_ctx)
+
                 if handled:
                     audit_repo.log(
                         tdm_user_id=user.tdm_user_id,
@@ -480,12 +485,12 @@ class BotRouter:
                 # даже если message_text пустой (например, пришёл файл)
                 elif context and context.active_service_code:
                     service = self.service_registry.get(context.active_service_code)
+
                     if service:
-                        handled = service.handle_message(
-                            self,
-                            event,
-                            context=context.context_data or {},
-                        )
+                        service_ctx = dict(context.context_data or {})
+                        service_ctx["step"] = context.step
+                        handled = service.handle_message(self, event, context=service_ctx)
+
                         if handled:
                             audit_repo.log(
                                 tdm_user_id=user.tdm_user_id,
