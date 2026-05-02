@@ -178,7 +178,7 @@ class DaDataBatchProcessor:
             "Москва_флаг": None,
             "Ошибка": None,
         }
-
+        
         query_value = row.detected_inn or row.detected_ogrn or row.detected_name
         digits = "".join(ch for ch in str(query_value) if ch.isdigit())
         has_letters = any(ch.isalpha() for ch in str(query_value))
@@ -266,29 +266,37 @@ class DaDataBatchProcessor:
             base["Ошибка"] = "Ничего не найдено"
             return base
 
-        data = selected.get("data", {})
-        name_data = data.get("name", {}) if data else {}
-        address_data = data.get("address", {}) if data else {}
-        management_data = data.get("management", {}) if data else {}
-        state_data = data.get("state", {}) if data else {}
+        try:
+            data = (selected.get("data") or {}) if isinstance(selected, dict) else {}
 
-        base["ИНН"] = data.get("inn")
-        base["КПП"] = data.get("kpp")
-        base["ОГРН"] = data.get("ogrn")
-        base["Полное_наименование"] = name_data.get("full_with_opf")
-        base["Краткое_наименование"] = name_data.get("short_with_opf")
-        base["Статус_организации"] = self._format_status(state_data.get("status"))
-        base["Дата_регистрации"] = self._format_timestamp_ms(state_data.get("registration_date"))
-        base["Дата_ликвидации"] = self._format_timestamp_ms(state_data.get("liquidation_date"))
-        base["Адрес"] = address_data.get("value")
-        base["Индекс"] = address_data.get("data", {}).get("postal_code")
-        base["Руководитель"] = self._format_management_names(management_data)
-        base["Должность"] = management_data.get("post")
-        base["ОКВЭД"] = data.get("okved")
-        base["ОКВЭД_описание"] = okved_description(base["ОКВЭД"])
-        base["Москва_флаг"] = "Да" if self._is_moscow_candidate(selected) else "Нет"
+            name_data = data.get("name") or {}
+            address_data = data.get("address") or {}
+            management_data = data.get("management") or {}
+            state_data = data.get("state") or {}
 
-        return base
+            address_inner = address_data.get("data") or {} 
+
+            base["ИНН"] = data.get("inn")
+            base["КПП"] = data.get("kpp")
+            base["ОГРН"] = data.get("ogrn")
+            base["Полное_наименование"] = name_data.get("full_with_opf")
+            base["Краткое_наименование"] = name_data.get("short_with_opf")
+            base["Статус_организации"] = self._format_status(state_data.get("status"))
+            base["Дата_регистрации"] = self._format_timestamp_ms(state_data.get("registration_date"))
+            base["Дата_ликвидации"] = self._format_timestamp_ms(state_data.get("liquidation_date"))
+            base["Адрес"] = address_data.get("value")
+            base["Индекс"] = address_inner.get("postal_code")
+            base["Руководитель"] = self._format_management_names(management_data)
+            base["Должность"] = management_data.get("post")
+            base["ОКВЭД"] = data.get("okved")
+            base["ОКВЭД_описание"] = okved_description(base["ОКВЭД"])
+            base["Москва_флаг"] = "Да" if self._is_moscow_candidate(selected) else "Нет"
+
+            return base
+
+        except Exception as e:
+            base["Ошибка"] = f"Row parse error: {str(e)[:500]}"
+            return base
 
     def _select_best_suggestion(self, suggestions: list[dict], query_type: str) -> Optional[dict]:
         if not suggestions:
